@@ -212,23 +212,80 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
+    def save_ply(self, path, mask: torch.Tensor = None):
         mkdir_p(os.path.dirname(path))
 
-        xyz = self._xyz.detach().cpu().numpy()
-        # mask = self._mask.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
+        # Detach all relevant tensors first
+        current_xyz = self._xyz.detach()
+        current_features_dc = self._features_dc.detach()
+        current_features_rest = self._features_rest.detach()
+        current_opacities = self._opacity.detach()
+        current_scaling = self._scaling.detach()
+        current_rotation = self._rotation.detach()
 
+        # Initialize tensors to be saved with current (possibly already segmented) data
+        xyz_to_save = current_xyz
+        features_dc_to_save = current_features_dc
+        features_rest_to_save = current_features_rest
+        opacities_to_save = current_opacities
+        scaling_to_save = current_scaling
+        rotation_to_save = current_rotation
+
+        if mask is not None:
+            processed_mask = mask.squeeze().bool()
+            
+            if processed_mask.shape[0] != current_xyz.shape[0]:
+                print(f"Warning/Error in save_ply: Provided mask shape {processed_mask.shape} does not match current XYZ shape {current_xyz.shape}.")
+                if self.segment_times > 0:
+                    print("Info: Model is already segmented (segment_times > 0). Provided mask is incompatible and will be IGNORED. Saving current (segmented) state of the model.")
+                    # No change to xyz_to_save etc., they remain the current segmented state.
+                else:
+                    # segment_times == 0, model is original/unsegmented. Mask should have matched.
+                    print("Error: Mask shape mismatch for an unsegmented model. Cannot save PLY.")
+                    return  # Critical error, cannot proceed
+            else: # Mask shape is compatible with current_xyz
+                if self.segment_times > 0:
+                    # This case implies the provided mask *matches* the already segmented data.
+                    # This could be an explicit request to further filter the *already segmented* data.
+                    print("Info: Model is already segmented, and a compatible mask was provided. Applying this mask to the current (segmented) data.")
+                    xyz_to_save = current_xyz[processed_mask]
+                    features_dc_to_save = current_features_dc[processed_mask]
+                    features_rest_to_save = current_features_rest[processed_mask]
+                    opacities_to_save = current_opacities[processed_mask]
+                    scaling_to_save = current_scaling[processed_mask]
+                    rotation_to_save = current_rotation[processed_mask]
+                else: # segment_times == 0, mask is compatible with original data
+                    print("Info: Applying provided mask to unsegmented model data.")
+                    xyz_to_save = current_xyz[processed_mask]
+                    features_dc_to_save = current_features_dc[processed_mask]
+                    features_rest_to_save = current_features_rest[processed_mask]
+                    opacities_to_save = current_opacities[processed_mask]
+                    scaling_to_save = current_scaling[processed_mask]
+                    rotation_to_save = current_rotation[processed_mask]
+        else: # mask is None
+            print("Info: No mask provided. Saving current state of the model.")
+            # xyz_to_save etc. are already set to current values
+
+        # Convert to NumPy arrays for saving
+        xyz_np = xyz_to_save.cpu().numpy()
+        
+        if xyz_np.shape[0] == 0:
+            print(f"Warning: No points to save for {path} (possibly due to mask or empty model). PLY file will not be written or will be empty.")
+            # Optionally, write an empty PLY or just return
+            # PlyData([]).write(path) # To write an empty valid PLY
+            return
+
+        normals_np = np.zeros_like(xyz_np)
+        f_dc_np = features_dc_to_save.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest_np = features_rest_to_save.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities_np = opacities_to_save.cpu().numpy()
+        scale_np = scaling_to_save.cpu().numpy()
+        rotation_np = rotation_to_save.cpu().numpy()
+        
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        # attributes = np.concatenate((xyz, mask, normals, f_dc, f_rest, opacities, scale, rotation), axis=1) if has_mask else np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements = np.empty(xyz_np.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz_np, normals_np, f_dc_np, f_rest_np, opacities_np, scale_np, rotation_np), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)

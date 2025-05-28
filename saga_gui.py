@@ -689,14 +689,51 @@ class GaussianSplattingGUI:
 
         if self.save_flag:
             print("Saving ...")
-            self.save_flag = False
+            self.save_flag = False # Reset flag at the beginning
             try:
                 os.makedirs("./segmentation_res", exist_ok=True)
+                
+                # Define save_mask as per instruction
                 save_mask = self.engine['scene']._mask == self.engine['scene'].segment_times + 1
-                torch.save(save_mask, f"./segmentation_res/{dpg.get_value('save_name')}.pt")
-            except:
-                with dpg.window(label="Tips"):
-                    dpg.add_text('You should segment the 3D object before save it (click segment3d first).')
+
+                if self.engine['scene'].segment_times == 0:
+                    if not dpg.does_item_exist("save_error_window"): 
+                        with dpg.window(label="Error", width=400, height=100, modal=True, show=True, tag="save_error_window", no_close=True):
+                            dpg.add_text("Please segment an object first before saving.")
+                            dpg.add_button(label="OK", width=-1, callback=lambda: dpg.configure_item("save_error_window", show=False))
+                    # Skip saving process
+                else:
+                    save_name_base = dpg.get_value('save_name')
+                    
+                    # Save the mask tensor first. This mask (`save_mask`) is derived from the original
+                    # point cloud state and the segmentation operation. It's used for saving the .pt file.
+                    mask_filename = save_name_base + ".pt"
+                    mask_filepath = os.path.join("./segmentation_res", mask_filename)
+                    torch.save(save_mask, mask_filepath)
+                    print(f"Mask tensor saved to {mask_filepath}")
+
+                    # Construct PLY file path
+                    ply_filename = save_name_base + ".ply"
+                    ply_filepath = os.path.join("./segmentation_res", ply_filename)
+                    
+                    # Since self.engine['scene'].segment_times > 0 here, the model's _xyz 
+                    # (and other attributes) are already segmented.
+                    # Therefore, pass mask=None to save_ply to save this already segmented state.
+                    self.engine['scene'].save_ply(ply_filepath, mask=None)
+                    print(f"Segmented PLY saved to {ply_filepath} (using current model state as it's already segmented)")
+                    
+                    # Display a success message
+                    if not dpg.does_item_exist("save_success_window"):
+                        with dpg.window(label="Success", width=450, height=120, modal=True, show=True, tag="save_success_window", no_close=True):
+                            dpg.add_text(f"Segmented data saved successfully!\n\nMask: {mask_filepath}\nPLY: {ply_filepath}")
+                            dpg.add_button(label="OK", width=-1, callback=lambda: dpg.configure_item("save_success_window", show=False))
+
+            except Exception as e:
+                print(f"Error during saving: {str(e)}")
+                if not dpg.does_item_exist("generic_save_error_window"):
+                    with dpg.window(label="Save Error", width=400, height=100, modal=True, show=True, tag="generic_save_error_window", no_close=True):
+                        dpg.add_text(f"An error occurred during saving: {str(e)}")
+                        dpg.add_button(label="OK", width=-1, callback=lambda: dpg.configure_item("generic_save_error_window", show=False))
 
         self.render_buffer = None
         render_num = 0
