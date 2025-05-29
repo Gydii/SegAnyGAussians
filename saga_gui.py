@@ -370,7 +370,8 @@ class GaussianSplattingGUI:
             dpg.add_button(label="roll_back", callback=roll_back, user_data="Some Data")
             dpg.add_button(label="clear", callback=clear_edit, user_data="Some Data")
             dpg.add_button(label="save as", callback=callback_save, user_data="Some Data")
-            dpg.add_input_text(label="", default_value="precomputed_mask", tag="save_name")
+            dpg.add_input_text(label="Save Filename Base", default_value="precomputed_mask", tag="save_name", hint="Filename without extension")
+            dpg.add_input_text(label="Segment Label (for PLY)", default_value="", tag="_segment_label_input", hint="E.g., window_sill (optional)")
             dpg.add_text("\n")
 
             dpg.add_button(label="cluster3d", callback=callback_cluster, user_data="Some Data")
@@ -719,8 +720,9 @@ class GaussianSplattingGUI:
                     # Since self.engine['scene'].segment_times > 0 here, the model's _xyz 
                     # (and other attributes) are already segmented.
                     # Therefore, pass mask=None to save_ply to save this already segmented state.
-                    self.engine['scene'].save_ply(ply_filepath, mask=None)
-                    print(f"Segmented PLY saved to {ply_filepath} (using current model state as it's already segmented)")
+                    segment_label_text = dpg.get_value("_segment_label_input")
+                    self.engine['scene'].save_ply(ply_filepath, mask=None, segment_label=segment_label_text)
+                    print(f"Segmented PLY saved to {ply_filepath} (using current model state as it's already segmented, segment label: '{segment_label_text}')")
                     
                     # Display a success message
                     if not dpg.does_item_exist("save_success_window"):

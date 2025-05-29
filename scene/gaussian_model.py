@@ -210,9 +210,10 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
+        l.append('label_id') # Add the new attribute here
         return l
 
-    def save_ply(self, path, mask: torch.Tensor = None):
+    def save_ply(self, path, mask: torch.Tensor = None, segment_label: str = None):
         mkdir_p(os.path.dirname(path))
 
         # Detach all relevant tensors first
@@ -281,11 +282,24 @@ class GaussianModel:
         opacities_np = opacities_to_save.cpu().numpy()
         scale_np = scaling_to_save.cpu().numpy()
         rotation_np = rotation_to_save.cpu().numpy()
+
+        # Create label_id_np array
+        label_id_value = 0  # Default value
+        if segment_label and segment_label.strip(): # If a non-empty label string is given
+            label_id_value = 1 # Assign 1 if any label is present
+        label_id_np = np.full((xyz_np.shape[0], 1), label_id_value, dtype=np.uint8)
         
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        # Revised dtype_full construction
+        attributes_list = self.construct_list_of_attributes()
+        dtype_full = []
+        for attribute_name in attributes_list:
+            if attribute_name == 'label_id':
+                dtype_full.append((attribute_name, 'u1'))
+            else:
+                dtype_full.append((attribute_name, 'f4')) # Default for others
 
         elements = np.empty(xyz_np.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz_np, normals_np, f_dc_np, f_rest_np, opacities_np, scale_np, rotation_np), axis=1)
+        attributes = np.concatenate((xyz_np, normals_np, f_dc_np, f_rest_np, opacities_np, scale_np, rotation_np, label_id_np), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
