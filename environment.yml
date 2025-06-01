@@ -1,4 +1,4 @@
-name: gaussegment
+name: gaussian_splatting
 channels:
   - pytorch
   - conda-forge

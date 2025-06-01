@@ -254,6 +254,2573 @@ class GaussianSplattingGUI:
         self.render_mode_cluster = False
 
         self.save_flag = False
+        self.active_selection_mask = None # New attribute for storing current selection mask
+
+    def callback_save_selection_to_label(self, sender=None, app_data=None):
+        print("DEBUG: callback_save_selection_to_label called.")
+        label_name = dpg.get_value("_new_label_name_input")
+
+        # 1. Error Handling for Empty Label Name
+        if not label_name.strip():
+            error_modal_tag = "empty_label_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Label name cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Error Handling for No Active Selection
+        if self.active_selection_mask is None:
+            error_modal_tag = "no_active_selection_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text("No active selection to save.\nPlease use 'segment3d' first to create a selection.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Mask Usage (direct use of self.active_selection_mask)
+        # CRITICAL ASSUMPTION: self.active_selection_mask is aligned with the original full point cloud.
+
+        # Optional: Add a check for mask shape if self.engine['scene']._xyz is accessible
+        # and represents the original cloud. Given the refactor ensuring _xyz is original, this should hold.
+        if self.active_selection_mask.shape[0] != self.engine['scene'].get_xyz.shape[0]:
+            warning_modal_tag = "mask_shape_warning_modal"
+            print(f"Warning: Active selection mask shape {self.active_selection_mask.shape} "
+                  f"does not match scene XYZ shape {self.engine['scene'].get_xyz.shape[0]}. This could indicate an issue.")
+            if dpg.does_item_exist(warning_modal_tag):
+                dpg.delete_item(warning_modal_tag)
+            with dpg.window(modal=True, label="Warning", tag=warning_modal_tag, width=450, height=120, no_close=True) as modal_id:
+                dpg.add_text(f"Mask shape mismatch:\nSelection: {self.active_selection_mask.shape[0]}, Scene: {self.engine['scene'].get_xyz.shape[0]}.\nThis might indicate an internal issue if the selection\nwas not derived from the current full point cloud.\nProceed with caution or clear selection and retry.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            # Depending on severity, might 'return' here. For now, it's a warning.
+
+        try:
+            # 4. Call to Backend
+            self.engine['scene'].add_or_update_segment_label(label_name, self.active_selection_mask)
+
+            # 5. GUI Updates After Successful Save
+            if hasattr(self.engine['scene'], 'segment_label_ids'):
+                dpg.configure_item("_labels_listbox", items=list(self.engine['scene'].segment_label_ids.keys()))
+
+            dpg.set_value("_new_label_name_input", "") # Clear input field
+
+            # Clear current selection state
+            self.active_selection_mask = None
+            self.new_click_xy = []  # Clear click prompts
+            self.prompt_num = 0
+
+            print(f"Segment label '{label_name}' saved/updated successfully. Selection cleared.")
+
+        except AttributeError as e:
+            # 6. Error Handling for Backend Call (AttributeError)
+            error_modal_tag = "attr_error_modal"
+            print(f"AttributeError: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n'add_or_update_segment_label' method not found\non scene object. Details: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            # 6. Error Handling for Backend Call (General Exception)
+            error_modal_tag = "general_save_label_error_modal"
+            print(f"Error saving label: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred while saving the label:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+    def callback_export_all_labels_to_ply(self, sender=None, app_data=None):
+        print("DEBUG: callback_export_all_labels_to_ply called.")
+        base_filename = dpg.get_value("_export_all_labels_filename_input")
+
+        # 1. Validate Filename
+        if not base_filename.strip():
+            error_modal_tag = "empty_export_filename_error_modal"
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                dpg.add_text("Export filename base cannot be empty.")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 2. Ensure output directory exists
+        output_dir = "./segmentation_res"
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            error_modal_tag = "export_dir_error_modal"
+            print(f"OSError creating directory {output_dir}: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Could not create directory:\n{output_dir}\nError: {str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+            return
+
+        # 3. Construct Full Path
+        filepath = os.path.join(output_dir, base_filename + ".ply")
+
+        # 4. Call Backend Method
+        try:
+            if not hasattr(self.engine['scene'], 'save_ply_with_all_labels'):
+                raise AttributeError("'save_ply_with_all_labels' method not found on scene object.")
+
+            self.engine['scene'].save_ply_with_all_labels(filepath)
+
+            # Success Message
+            success_modal_tag = "export_all_success_modal"
+            print(f"Successfully exported all labels to {filepath}")
+            if dpg.does_item_exist(success_modal_tag):
+                dpg.delete_item(success_modal_tag)
+            with dpg.window(modal=True, label="Success", tag=success_modal_tag, width=450, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Successfully exported all labels to:\n{filepath}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
+        except AttributeError as e:
+            error_modal_tag = "export_attr_error_modal"
+            print(f"AttributeError during export: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"Internal Error:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        except Exception as e:
+            error_modal_tag = "general_export_error_modal"
+            print(f"Error during export all labels: {e}")
+            if dpg.does_item_exist(error_modal_tag):
+                dpg.delete_item(error_modal_tag)
+            with dpg.window(modal=True, label="Error", tag=error_modal_tag, width=400, height=100, no_close=True) as modal_id:
+                dpg.add_text(f"An error occurred during export:\n{str(e)}")
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+
     def __del__(self):
         dpg.destroy_context()
 
@@ -368,10 +2935,21 @@ class GaussianSplattingGUI:
             dpg.add_text("\n")
             dpg.add_button(label="segment3d", callback=callback_segment3d, user_data="Some Data")
             dpg.add_button(label="roll_back", callback=roll_back, user_data="Some Data")
-            dpg.add_button(label="clear", callback=clear_edit, user_data="Some Data")
+            dpg.add_button(label="Clear Click Prompts", callback=clear_edit, user_data="Some Data") # Renamed "clear" button
             dpg.add_button(label="save as", callback=callback_save, user_data="Some Data")
             dpg.add_input_text(label="Save Filename Base", default_value="precomputed_mask", tag="save_name", hint="Filename without extension")
             dpg.add_input_text(label="Segment Label (for PLY)", default_value="", tag="_segment_label_input", hint="E.g., window_sill (optional)")
+
+            dpg.add_separator()
+            dpg.add_text("Segment Label Management")
+            dpg.add_input_text(label="New Label Name", tag="_new_label_name_input", default_value="", hint="Enter label for current selection")
+            dpg.add_button(label="Save Current Selection to Label", callback=self.callback_save_selection_to_label)
+            dpg.add_listbox(tag="_labels_listbox", items=[], label="Saved Segment Labels", num_items=3)
+
+            dpg.add_separator()
+            dpg.add_text("Export All Labeled Data")
+            dpg.add_input_text(label="Export All Filename Base", default_value="scene_with_all_labels", tag="_export_all_labels_filename_input", hint="Filename without .ply extension")
+            dpg.add_button(label="Export All Labels to PLY", callback=self.callback_export_all_labels_to_ply)
             dpg.add_text("\n")
 
             dpg.add_button(label="cluster3d", callback=callback_cluster, user_data="Some Data")
@@ -603,21 +3181,26 @@ class GaussianSplattingGUI:
             self.new_click_xy = []
             self.clear_edit = False
             self.prompt_num = 0
+            self.active_selection_mask = None # Clear active selection mask
+            # Calls to self.engine['scene'].clear_segment() are kept as it now only resets segment_times
             try:
                 self.engine['scene'].clear_segment()
-                self.engine['feature'].clear_segment()
-            except:
-                pass
+                if hasattr(self.engine.get('feature'), 'clear_segment'): # Check if feature model has it
+                    self.engine['feature'].clear_segment()
+            except Exception as e:
+                print(f"Error in clear_edit calling clear_segment: {e}")
+            print("GUI clear_edit: Cleared click prompts and active selection mask.")
+
 
         if self.roll_back:
             self.new_click_xy = []
-            self.roll_back = False
+            self.roll_back = False # Reset flag
             self.prompt_num = 0
-            # try:
-            self.engine['scene'].roll_back()
-            self.engine['feature'].roll_back()
-            # except:
-                # pass
+            self.active_selection_mask = None # Clear active selection mask
+            # Removed calls to self.engine['scene'].roll_back() and self.engine['feature'].roll_back()
+            # as they are now no-ops for geometry and state is managed here.
+            print("GUI roll_back: Cleared click prompts and active selection mask.")
+
         
         if self.reload_flag:
             self.reload_flag = False
@@ -653,8 +3236,90 @@ class GaussianSplattingGUI:
             score_map = torch.max(score_map, dim=-1).values
             score_norm = (score_map - dpg.get_value('_ScoreThres')) / (1 - dpg.get_value('_ScoreThres'))
 
+            # Preview logic update:
             if self.preview:
-                rgb_score = img * torch.max(score_binary, dim=-1, keepdim=True).values    # option: binary
+                if self.active_selection_mask is not None:
+                    # Ensure active_selection_mask is on the correct device and has the right shape for broadcasting
+                    # Assuming active_selection_mask is a 1D boolean tensor for points,
+                    # and img is HxWx3. We need to apply this to the rendered image.
+                    # This part is tricky because active_selection_mask is on points, not pixels.
+                    # The original 'score_binary' was pixel-based.
+                    # For a direct application, active_selection_mask would need to be projected to screen space.
+                    # However, the current structure uses score_binary (pixel-based) for preview.
+                    # If segment3d was just pressed, score_binary (from clicks) might be stale or irrelevant.
+                    # Let's assume for now that if active_selection_mask is set, the preview should
+                    # reflect *that* selection. If active_selection_mask is point-based,
+                    # direct multiplication with 'img' isn't right.
+                    # The original preview was: img * torch.max(score_binary, dim=-1, keepdim=True).values
+                    # score_binary was HxW. self.active_selection_mask (from score_pts_binary) is N.
+                    # This suggests the preview mechanism itself might need a rethink if active_selection_mask
+                    # is to be previewed directly without re-rendering or projecting.
+                    #
+                    # Given the current structure, if segment3d_flag was just processed,
+                    # score_binary might still hold the values from the clicks that led to active_selection_mask.
+                    # If clicks were cleared, score_binary would be None.
+
+                    # Decision: If active_selection_mask is present, it means "segment3d" was used.
+                    # The preview should ideally show this. However, direct use is hard.
+                    # For now, if clicks are still active (score_binary is not None), let it use that.
+                    # If clicks were cleared but active_selection_mask exists, the current preview logic
+                    # would not show active_selection_mask.
+                    # This part of the prompt "The current "preview" mode ... can remain the primary way to visualize the active selection"
+                    # might imply that the existing score_binary (pixel-based mask from clicks) is sufficient for preview.
+                    # Let's stick to modifying rgb_score based on a pixel-level mask.
+                    # If active_selection_mask is set, it means a "segment3d" operation was done.
+                    # The score_binary from the clicks leading to it is what was previewed.
+                    # If clicks are cleared after, score_binary becomes None.
+                    # A simple solution: if active_selection_mask is set, we assume the user wants to see that effect,
+                    # but the current code applies a *pixel* mask.
+                    # The most straightforward interpretation is to keep using score_binary for preview,
+                    # and active_selection_mask is the thing that's *saved*.
+                    # The prompt: "Ensure that when self.preview is active, it uses self.active_selection_mask (if available) for highlighting."
+                    # This is contradictory if active_selection_mask is point-based and preview is pixel-based.
+                    #
+                    # Let's assume the intention is: if a segment3d operation has occurred (active_selection_mask is set),
+                    # AND there are no *new* clicks (score_binary is None or from those same clicks),
+                    # then the preview should reflect active_selection_mask. This is still hard without projection.
+                    #
+                    # Simpler interpretation: Preview always uses current click-based `score_binary`.
+                    # `active_selection_mask` is just for saving.
+                    # If this is the case, no change to preview logic needed other than what's there.
+                    #
+                    # Re-reading: "Ensure that when self.preview is active, it uses self.active_selection_mask (if available) for highlighting."
+                    # This implies active_selection_mask needs to be visualized.
+                    # The current score_binary is the result of featmap @ self.chosen_feature.
+                    # If segment3d was pressed, self.chosen_feature was used to make self.score_pts_binary (-> self.active_selection_mask)
+                    # So, score_binary is ALREADY the pixel projection of what formed active_selection_mask,
+                    # as long as self.chosen_feature hasn't changed and clicks haven't been cleared.
+
+                    # If clicks were cleared (len(self.new_click_xy) == 0), then score_binary would be None.
+                    # In this case, if self.active_selection_mask is not None, we *don't* have a pixel mask for it.
+                    # This is the tricky part.
+                    # For now, let's prioritize live clicks for preview. If clicks are cleared, preview of active_selection_mask is lost
+                    # with the current pixel-based preview mechanism.
+                    if score_binary is not None:
+                         rgb_score = img * torch.max(score_binary, dim=-1, keepdim=True).values
+                    # else: if self.active_selection_mask is not None, how to preview? This is the gap.
+                    # For now, if score_binary is None, it implies no preview from clicks.
+                    # If active_selection_mask is just for saving, then no change is needed here.
+                    # Given the complexity, I will assume the existing preview mechanism based on `score_binary`
+                    # (which is pixel-based) is what's intended for "preview", and `active_selection_mask`
+                    # (point-based) is for the backend logic like saving.
+                    # Thus, the original line for rgb_score in preview mode is likely fine.
+                    # The main change is that self.active_selection_mask now *stores* the point-based selection.
+                    # The prompt might have a slight ambiguity here.
+                    # If a direct visualization of point-based self.active_selection_mask is needed,
+                    # it would require rendering the scene with an override_color based on this mask,
+                    # which is a much larger change than what seems implied for this step.
+
+                    # Let's stick to the most direct interpretation: if score_binary is available, use it.
+                    # This means if clicks are cleared, preview of that selection is also cleared.
+                    if score_binary is not None:
+                         rgb_score = img * torch.max(score_binary, dim=-1, keepdim=True).values
+                    else:
+                        # No live click mask, and no direct way to show point-based active_selection_mask
+                        # without re-rendering. So, show original image in preview mode.
+                        rgb_score = img
             else:
                 rgb_score = img
             depth_score = 1 - torch.clip(score_norm, 0, 1)
@@ -681,31 +3346,34 @@ class GaussianSplattingGUI:
 
                 # save_path = "./debug_robot_{:0>3d}.ply".format(self.object_seg_id)
                 # try:
-                #     self.engine['scene'].roll_back()
-                #     self.engine['feature'].roll_back()
+                #     self.engine['scene'].roll_back() # Keep commented
+                #     self.engine['feature'].roll_back() # Keep commented
                 # except:
                 #     pass
-                self.engine['scene'].segment(self.score_pts_binary)
-                self.engine['feature'].segment(self.score_pts_binary)
+                # self.engine['scene'].segment(self.score_pts_binary) # REMOVED
+                # self.engine['feature'].segment(self.score_pts_binary) # REMOVED
+                self.active_selection_mask = self.score_pts_binary # Store the mask
+                print(f"segment3d_flag: Set active_selection_mask. Point count: {torch.count_nonzero(self.active_selection_mask) if self.active_selection_mask is not None else 'None'}")
+
 
         if self.save_flag:
             print("Saving ...")
             self.save_flag = False # Reset flag at the beginning
             try:
                 os.makedirs("./segmentation_res", exist_ok=True)
-                
+
                 # Define save_mask as per instruction
                 save_mask = self.engine['scene']._mask == self.engine['scene'].segment_times + 1
 
                 if self.engine['scene'].segment_times == 0:
-                    if not dpg.does_item_exist("save_error_window"): 
+                    if not dpg.does_item_exist("save_error_window"):
                         with dpg.window(label="Error", width=400, height=100, modal=True, show=True, tag="save_error_window", no_close=True):
                             dpg.add_text("Please segment an object first before saving.")
                             dpg.add_button(label="OK", width=-1, callback=lambda: dpg.configure_item("save_error_window", show=False))
                     # Skip saving process
                 else:
                     save_name_base = dpg.get_value('save_name')
-                    
+
                     # Save the mask tensor first. This mask (`save_mask`) is derived from the original
                     # point cloud state and the segmentation operation. It's used for saving the .pt file.
                     mask_filename = save_name_base + ".pt"
@@ -716,14 +3384,14 @@ class GaussianSplattingGUI:
                     # Construct PLY file path
                     ply_filename = save_name_base + ".ply"
                     ply_filepath = os.path.join("./segmentation_res", ply_filename)
-                    
-                    # Since self.engine['scene'].segment_times > 0 here, the model's _xyz 
+
+                    # Since self.engine['scene'].segment_times > 0 here, the model's _xyz
                     # (and other attributes) are already segmented.
                     # Therefore, pass mask=None to save_ply to save this already segmented state.
                     segment_label_text = dpg.get_value("_segment_label_input")
                     self.engine['scene'].save_ply(ply_filepath, mask=None, segment_label=segment_label_text)
                     print(f"Segmented PLY saved to {ply_filepath} (using current model state as it's already segmented, segment label: '{segment_label_text}')")
-                    
+
                     # Display a success message
                     if not dpg.does_item_exist("save_success_window"):
                         with dpg.window(label="Success", width=450, height=120, modal=True, show=True, tag="save_success_window", no_close=True):

@@ -59,6 +59,11 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+        # Attributes for managing multiple named segmentation masks
+        self.named_segment_masks = {}  # Stores label_name: mask_tensor (full cloud)
+        self.segment_label_ids = {}    # Stores label_name: integer_id
+        self.next_label_id = 1         # Next available ID for new labels
+
         self.old_xyz = []
         self.old_mask = []
 
@@ -234,7 +239,7 @@ class GaussianModel:
 
         if mask is not None:
             processed_mask = mask.squeeze().bool()
-            
+
             if processed_mask.shape[0] != current_xyz.shape[0]:
                 print(f"Warning/Error in save_ply: Provided mask shape {processed_mask.shape} does not match current XYZ shape {current_xyz.shape}.")
                 if self.segment_times > 0:
@@ -269,7 +274,7 @@ class GaussianModel:
 
         # Convert to NumPy arrays for saving
         xyz_np = xyz_to_save.cpu().numpy()
-        
+
         if xyz_np.shape[0] == 0:
             print(f"Warning: No points to save for {path} (possibly due to mask or empty model). PLY file will not be written or will be empty.")
             # Optionally, write an empty PLY or just return
@@ -288,7 +293,7 @@ class GaussianModel:
         if segment_label and segment_label.strip(): # If a non-empty label string is given
             label_id_value = 1 # Assign 1 if any label is present
         label_id_np = np.full((xyz_np.shape[0], 1), label_id_value, dtype=np.uint8)
-        
+
         # Revised dtype_full construction
         attributes_list = self.construct_list_of_attributes()
         dtype_full = []
@@ -445,102 +450,196 @@ class GaussianModel:
 
     @torch.no_grad()
     def segment(self, mask=None):
-        assert mask is not None
-            # mask = (self._mask > 0)
-        mask = mask.squeeze()
-        # assert mask.shape[0] == self._xyz.shape[0]
-        if torch.count_nonzero(mask) == 0:
-            mask = ~mask
-            print("Seems like the mask is empty, segmenting the whole point cloud. Please run seg.py first.")
-
-        self.old_xyz.append(self._xyz)
-        self.old_mask.append(self._mask)
-
-        self.old_features_dc.append(self._features_dc)
-        self.old_features_rest.append(self._features_rest)
-        self.old_opacity.append(self._opacity)
-        self.old_scaling.append(self._scaling)
-        self.old_rotation.append(self._rotation)
+        """
+        This method is now a NO-OP regarding model geometry/attribute pruning.
+        It was previously used to apply a mask to self._xyz and related features,
+        effectively segmenting the model by removing points.
+        This functionality is removed to ensure self._xyz always represents the
+        original, complete point cloud. Named segmentations are handled by
+        self.named_segment_masks and add_or_update_segment_label.
+        """
+        # The following lines are removed/commented out:
+        # - Appending to self.old_xyz, self.old_features_dc, etc.
+        # - Modification of self._xyz, self._features_dc, etc. based on the mask.
+        # - Calls to self._prune_optimizer that would modify these attributes.
+        # - Updates to self.segment_times and self._mask related to this pruning.
         
-        if self.optimizer is None:
-            self._xyz = self._xyz[mask]
-            # self._mask = self._mask[mask]
+        # if mask is not None:
+        #     print(f"Debug: GaussianModel.segment called with mask. Shape: {mask.shape if hasattr(mask, 'shape') else 'N/A'}")
+        # else:
+        #     print("Debug: GaussianModel.segment called without mask.")
+        # print("Info: GaussianModel.segment is now a no-op for geometry pruning.")
+        pass
 
-            self._features_dc = self._features_dc[mask]
-            self._features_rest = self._features_rest[mask]
-            self._opacity = self._opacity[mask]
-            self._scaling = self._scaling[mask]
-            self._rotation = self._rotation[mask]
-
-        else:
-            optimizable_tensors = self._prune_optimizer(mask)
-
-            self._xyz = optimizable_tensors["xyz"]
-
-            # self._mask = optimizable_tensors["mask"]
-
-            self._features_dc = optimizable_tensors["f_dc"]
-            self._features_rest = optimizable_tensors["f_rest"]
-            self._opacity = optimizable_tensors["opacity"]
-            self._scaling = optimizable_tensors["scaling"]
-            self._rotation = optimizable_tensors["rotation"]
-
-            self.xyz_gradient_accum = self.xyz_gradient_accum[mask]
-
-            self.denom = self.denom[mask]
-
-        # print(self.segment_times, torch.unique(self._mask))
-        self.segment_times += 1
-        tmp = self._mask[self._mask == self.segment_times]
-        tmp[mask] += 1
-        self._mask[self._mask == self.segment_times] = tmp
-
-        # print(self._mask[self._mask == self.segment_times][mask].shape)
-        # print(self.segment_times, torch.unique(self._mask), torch.unique(mask))
-        
     def roll_back(self):
-        try:
-            self._xyz = self.old_xyz.pop()
-            # self._mask = self.old_mask.pop()
+        """
+        This method is now a NO-OP.
+        It previously restored self._xyz and other attributes from self.old_xyz etc.,
+        and decremented self.segment_times. Since self._xyz is no longer pruned by segment(),
+        this restoration is not needed. Clearing of GUI-level selection state
+        is handled in the GUI's roll_back callback.
+        """
+        # The following lines are removed/commented out:
+        # - Popping from self.old_xyz, self.old_features_dc, etc. and assigning to self._xyz etc.
+        # - Decrementing self.segment_times and related self._mask manipulation.
+        # print("Info: GaussianModel.roll_back is now a no-op.")
+        pass
 
-            self._features_dc = self.old_features_dc.pop()
-            self._features_rest = self.old_features_rest.pop()
-            self._opacity = self.old_opacity.pop()
-            self._scaling = self.old_scaling.pop()
-            self._rotation = self.old_rotation.pop()
-
-            
-            self._mask[self._mask == self.segment_times+1] -= 1
-            self.segment_times -= 1
-        except:
-            pass
-    
     @torch.no_grad()
     def clear_segment(self):
-        try:
-            self._xyz = self.old_xyz[0]
-            # self._mask = self.old_mask[0]
+        """
+        This method is now simplified.
+        It previously restored self._xyz to its initial state from self.old_xyz[0]
+        and reset various lists and self.segment_times.
+        Since self._xyz is no longer changed by segment(), it now only resets
+        self.segment_times. The self._mask attribute's role is also diminished.
+        Actual clearing of named segmentations would need a different method.
+        """
+        # The following lines are removed/commented out:
+        # - Restoring self._xyz etc. from self.old_xyz[0] etc.
+        # - Clearing self.old_xyz, self.old_features_dc, etc. lists.
+        # - Re-initializing self._mask to ones. (self._mask's role is reduced)
 
-            self._features_dc = self.old_features_dc[0]
-            self._features_rest = self.old_features_rest[0]
-            self._opacity = self.old_opacity[0]
-            self._scaling = self.old_scaling[0]
-            self._rotation = self.old_rotation[0]
+        self.segment_times = 0 # Reset counter, though its primary use was with pruning.
+        # print("Info: GaussianModel.clear_segment now primarily resets segment_times.")
+        pass
 
-            self.old_xyz = []
-            self.old_mask = []
+    def add_or_update_segment_label(self, label_name: str, selection_mask: torch.Tensor):
+        """
+        Adds a new segment label and its mask, or updates the mask for an existing label.
 
-            self.old_features_dc = []
-            self.old_features_rest = []
-            self.old_opacity = []
-            self.old_scaling = []
-            self.old_rotation = []
+        Args:
+            label_name (str): The user-defined name for the segment.
+            selection_mask (torch.Tensor): A boolean tensor mask aligned with the
+                                           original full point cloud. True values indicate
+                                           points belonging to this segment label.
+        """
+        if not isinstance(label_name, str) or not label_name.strip():
+            print("Error: Segment label name cannot be empty.")
+            return
 
-            self.segment_times = 0
-            self._mask = torch.ones((self._xyz.shape[0],), dtype=torch.float, device="cuda")
-        except:
-            # print("Roll back failed. Please run gaussians.segment() first.")
-            pass
+        if not isinstance(selection_mask, torch.Tensor) or selection_mask.dtype != torch.bool:
+            print(f"Error: selection_mask for label '{label_name}' must be a boolean torch.Tensor.")
+            return
+
+        # Placeholder for a more robust size check if needed in the future,
+        # e.g., if self._xyz could be a pruned version of the original cloud.
+        # For now, this method assumes selection_mask is aligned with the original point cloud.
+        # if hasattr(self, 'initial_point_count') and selection_mask.shape[0] != self.initial_point_count:
+        #     print(f"Error: selection_mask shape {selection_mask.shape} does not match initial point cloud size {self.initial_point_count}.")
+        #     return
+
+        self.named_segment_masks[label_name] = selection_mask.clone() # Store a clone
+
+        if label_name not in self.segment_label_ids:
+            current_id = self.next_label_id
+            self.segment_label_ids[label_name] = current_id
+            self.next_label_id += 1
+            print(f"Added new segment label: '{label_name}' with ID {current_id}")
+        else:
+            # Mask is updated, ID remains the same.
+            print(f"Updated mask for segment label: '{label_name}' (ID: {self.segment_label_ids[label_name]})")
+
+    def save_ply_with_all_labels(self, path: str):
+        """
+        Saves the entire original point cloud with a 'classification_id' scalar field.
+        The ID for each point is determined by the named segment masks.
+        """
+        mkdir_p(os.path.dirname(path))
+
+        # --- Data Preparation ---
+        # These are assumed to be the original, full point cloud attributes.
+        xyz_np = self._xyz.detach().cpu().numpy()
+        # No normals are explicitly stored in GaussianModel for PLY, so create zeros.
+        # Or, if there's a way to get original normals, use that. For now, zeros.
+        normals_np = np.zeros_like(xyz_np)
+        f_dc_np = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest_np = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities_np = self._opacity.detach().cpu().numpy() # These are raw opacities
+        scale_np = self._scaling.detach().cpu().numpy()     # These are raw scales
+        rotation_np = self._rotation.detach().cpu().numpy()
+
+        if xyz_np.shape[0] == 0:
+            print(f"Warning: Original point cloud is empty. Cannot save {path}.")
+            return
+
+        # --- Classification ID Calculation ---
+        num_points = xyz_np.shape[0]
+        # Initialize classification_ids with 0 (unlabeled)
+        classification_id_np = np.zeros((num_points, 1), dtype=np.uint16) # Using uint16 for more IDs if needed
+
+        # Iterate through named segments. Handle overlaps by priority (e.g., first found).
+        # For more sophisticated overlap handling, a different approach would be needed.
+        # Consider sorting labels by ID or name if consistent overwrite behavior is desired.
+        sorted_label_names = sorted(self.segment_label_ids.keys(), key=lambda k: self.segment_label_ids[k])
+
+        for label_name in sorted_label_names:
+            if label_name in self.named_segment_masks:
+                mask_tensor = self.named_segment_masks[label_name]
+                if mask_tensor.shape[0] != num_points:
+                    print(f"Warning: Mask for label '{label_name}' has shape {mask_tensor.shape} "
+                          f"which does not match point cloud size {num_points}. Skipping this label.")
+                    continue
+
+                label_id = self.segment_label_ids[label_name]
+                # Apply mask: points where mask is True get this label_id
+                # This will overwrite if a point is in multiple masks; last one processed by this loop wins
+                # if not sorted, or first one if sorted and we check if classification_id_np is 0.
+                # To ensure first label found wins for a point:
+                # classification_id_np[mask_tensor.cpu().numpy() & (classification_id_np == 0)] = label_id
+                # For "last label applied wins" (simpler):
+                classification_id_np[mask_tensor.cpu().numpy()] = label_id
+
+
+        # --- PLY Structure Definition ---
+        # Get base attributes list (excluding the new classification_id)
+        # temp_model = GaussianModel(self.max_sh_degree) # Create a temp instance to call construct_list_of_attributes
+                                                     # This is a bit of a hack. Better if construct_list_of_attributes
+                                                     # was static or didn't depend on features_dc etc. being populated.
+                                                     # Or, modify construct_list_of_attributes to be more flexible.
+                                                     # For now, this will work if __init__ doesn't crash it.
+        
+        # Let's define the attribute list directly for this save function to avoid issues with
+        # construct_list_of_attributes() if it relies on specific states of features_dc etc.
+        # or the 'label_id' from the *other* save function.
+
+        attributes_names = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        # Ensure features_dc and features_rest are on CPU and detached for shape access if not already
+        features_dc_shape = self._features_dc.shape
+        features_rest_shape = self._features_rest.shape
+
+        for i in range(features_dc_shape[1]*features_dc_shape[2]):
+            attributes_names.append(f'f_dc_{i}')
+        for i in range(features_rest_shape[1]*features_rest_shape[2]):
+            attributes_names.append(f'f_rest_{i}')
+        attributes_names.append('opacity')
+        for i in range(self._scaling.shape[1]):
+            attributes_names.append(f'scale_{i}')
+        for i in range(self._rotation.shape[1]):
+            attributes_names.append(f'rot_{i}')
+        # Add our new classification field
+        attributes_names.append('classification_id')
+
+        dtype_full = []
+        for attribute_name in attributes_names:
+            if attribute_name == 'classification_id':
+                dtype_full.append((attribute_name, 'u2')) # uint16, same as classification_id_np
+            else:
+                dtype_full.append((attribute_name, 'f4')) # Default for others
+
+        # --- Concatenate all attributes for PLY ---
+        all_attributes_np = np.concatenate(
+            (xyz_np, normals_np, f_dc_np, f_rest_np, opacities_np, scale_np, rotation_np, classification_id_np),
+            axis=1
+        )
+
+        elements = np.empty(num_points, dtype=dtype_full)
+        elements[:] = list(map(tuple, all_attributes_np))
+
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+        print(f"Saved multi-label PLY to {path} with 'classification_id' field.")
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
