@@ -255,6 +255,8 @@ class GaussianSplattingGUI:
 
         self.save_flag = False
         self.active_selection_mask = None # New attribute for storing current selection mask
+        self.show_3d_preview = False      # Boolean to control 3D preview state
+        self.preview_selection_mask = None # Stores the point-based mask for 3D preview
 
     def callback_save_selection_to_label(self, sender=None, app_data=None):
         print("DEBUG: callback_save_selection_to_label called.")
@@ -314,7 +316,11 @@ class GaussianSplattingGUI:
             self.new_click_xy = []  # Clear click prompts
             self.prompt_num = 0
 
-            print(f"Segment label '{label_name}' saved/updated successfully. Selection cleared.")
+            # Also reset 3D preview state after saving a label
+            self.show_3d_preview = False
+            self.preview_selection_mask = None
+            self.update_camera = True # Ensure view refreshes
+            print(f"Segment label '{label_name}' saved/updated successfully. Selection and 3D preview cleared.")
 
         except AttributeError as e:
             # 6. Error Handling for Backend Call (AttributeError)
@@ -2821,6 +2827,39 @@ class GaussianSplattingGUI:
                 dpg.add_spacer(height=5)
                 dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
 
+    def callback_toggle_3d_preview(self, sender=None, app_data=None):
+        self.show_3d_preview = not self.show_3d_preview
+        if self.show_3d_preview:
+            # If there's an active selection mask (from a finalized "segment3d" action), use that.
+            if self.active_selection_mask is not None:
+                self.preview_selection_mask = self.active_selection_mask
+                print("DEBUG: 3D Preview ON. Using active_selection_mask.")
+            # Else, if there's a fresh point-based score from clicks (score_pts_binary), use that.
+            # This allows previewing before finalizing with "segment3d".
+            elif hasattr(self, 'score_pts_binary') and self.score_pts_binary is not None:
+                self.preview_selection_mask = self.score_pts_binary
+                print("DEBUG: 3D Preview ON. Using current score_pts_binary from clicks.")
+            else:
+                # No selection available to preview. Turn preview off.
+                self.show_3d_preview = False
+                self.preview_selection_mask = None
+                print("DEBUG: No selection (active_selection_mask or score_pts_binary) available for 3D Preview. Preview remains OFF.")
+                # Optionally, show a DPG modal error/info message here
+                error_modal_tag = "no_selection_for_preview_modal"
+                if dpg.does_item_exist(error_modal_tag):
+                    dpg.delete_item(error_modal_tag)
+                with dpg.window(modal=True, label="Info", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                    dpg.add_text("No 3D selection available to preview.\nUse clicks and 'segment3d' first.")
+                    dpg.add_spacer(height=5)
+                    dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+        else:
+            self.preview_selection_mask = None
+            print("DEBUG: 3D Preview OFF.")
+
+        # Trigger a re-render if needed (update_camera usually does this)
+        self.update_camera = True
+
+
     def __del__(self):
         dpg.destroy_context()
 
@@ -2934,6 +2973,8 @@ class GaussianSplattingGUI:
             
             dpg.add_text("\n")
             dpg.add_button(label="segment3d", callback=callback_segment3d, user_data="Some Data")
+            # New Preview Button
+            dpg.add_button(label="Preview 3D Selection", tag="_preview_3d_button", callback=self.callback_toggle_3d_preview)
             dpg.add_button(label="roll_back", callback=roll_back, user_data="Some Data")
             dpg.add_button(label="Clear Click Prompts", callback=clear_edit, user_data="Some Data") # Renamed "clear" button
             dpg.add_button(label="save as", callback=callback_save, user_data="Some Data")
@@ -3151,18 +3192,108 @@ class GaussianSplattingGUI:
     @torch.no_grad()
     def fetch_data(self, view_camera):
         
-        scene_outputs = render(view_camera, self.engine['scene'], self.opt, self.bg_color)
-        feature_outputs = render_contrastive_feature(view_camera, self.engine['feature'], self.opt, self.bg_feature)
+        scene_to_render = self.engine['scene']
+        feature_model_to_render = self.engine['feature']
+        is_previewing_isolate = False
+
+        if self.show_3d_preview and self.preview_selection_mask is not None:
+            original_scene = self.engine['scene']
+            num_original_points = original_scene.get_xyz.shape[0]
+
+            if not (isinstance(self.preview_selection_mask, torch.Tensor) and self.preview_selection_mask.dtype == torch.bool):
+                print("Warning: preview_selection_mask is not a boolean tensor. Turning off 3D preview.")
+                self.show_3d_preview = False
+                self.preview_selection_mask = None
+            elif self.preview_selection_mask.shape[0] != num_original_points:
+                print(f"Warning: preview_selection_mask shape {self.preview_selection_mask.shape} "
+                      f"does not match scene XYZ shape {num_original_points}. Turning off 3D preview.")
+                self.show_3d_preview = False
+                self.preview_selection_mask = None
+            else:
+                num_selected_points = torch.count_nonzero(self.preview_selection_mask).item()
+                if num_selected_points == 0:
+                    print("Warning: Preview selection is empty. Turning off 3D preview.")
+                    self.show_3d_preview = False
+                    self.preview_selection_mask = None
+                    # Optionally show a DPG modal here
+                    error_modal_tag = "empty_preview_selection_modal"
+                    if dpg.does_item_exist(error_modal_tag):
+                        dpg.delete_item(error_modal_tag)
+                    with dpg.window(modal=True, label="Info", tag=error_modal_tag, width=350, height=100, no_close=True) as modal_id:
+                        dpg.add_text("The current selection is empty.\nNothing to preview in isolate mode.")
+                        dpg.add_spacer(height=5)
+                        dpg.add_button(label="Ok", width=-1, callback=lambda: dpg.delete_item(modal_id))
+                else:
+                    print(f"DEBUG: Creating temporary model for isolate preview. Selected points: {num_selected_points}")
+                    # Create and populate preview_scene_model
+                    preview_scene_model = GaussianModel(sh_degree=original_scene.max_sh_degree)
+                    preview_scene_model.active_sh_degree = original_scene.active_sh_degree
+
+                    attributes_to_filter_scene = ['_xyz', '_features_dc', '_features_rest', '_opacity', '_scaling', '_rotation']
+                    for attr_name in attributes_to_filter_scene:
+                        original_attr_tensor = getattr(original_scene, attr_name)
+                        if original_attr_tensor is not None and original_attr_tensor.shape[0] == num_original_points:
+                            filtered_tensor = original_attr_tensor.detach()[self.preview_selection_mask]
+                            setattr(preview_scene_model, attr_name, torch.nn.Parameter(filtered_tensor))
+                        elif original_attr_tensor is not None: # Handle cases like max_radii2D if they were class members
+                             print(f"Warning: Attribute {attr_name} shape mismatch or not handled for preview model, skipping.")
+
+                    # Critical: Reinitialize optimizer-dependent states if they are used by getters or rendering
+                    # For simple preview, this might not be strictly necessary if render() directly uses the nn.Parameters
+                    # preview_scene_model.max_radii2D might need to be re-calculated or filtered.
+                    # However, for basic rendering, the above attributes are key.
+                    # Let's assume max_radii2D isn't directly used by basic render or will work with fewer points.
+
+                    scene_to_render = preview_scene_model
+                    is_previewing_isolate = True
+
+                    # Handle FeatureGaussianModel similarly
+                    original_feature_model = self.engine['feature']
+                    if hasattr(original_feature_model, '_xyz'): # Check if it's point-based
+                        preview_feature_model = FeatureGaussianModel(original_feature_model.feature_dim) # Assuming feature_dim attr
+                        preview_feature_model.active_sh_degree = original_feature_model.active_sh_degree # if exists
+
+                        attributes_to_filter_feature = ['_xyz', '_point_features', '_opacity', '_scaling', '_rotation'] # Adjust based on FeatureGaussianModel
+                        for attr_name in attributes_to_filter_feature:
+                            if hasattr(original_feature_model, attr_name):
+                                original_attr_tensor = getattr(original_feature_model, attr_name)
+                                if original_attr_tensor is not None and original_attr_tensor.shape[0] == num_original_points:
+                                    filtered_tensor = original_attr_tensor.detach()[self.preview_selection_mask]
+                                    setattr(preview_feature_model, attr_name, torch.nn.Parameter(filtered_tensor))
+                        feature_model_to_render = preview_feature_model
+                    else: # If feature model isn't point-based in the same way, use original
+                        feature_model_to_render = original_feature_model
+
+
+        # --- Main Rendering Calls ---
+        scene_outputs = render(view_camera, scene_to_render, self.opt, self.bg_color)
+
+        # Conditional rendering for features if it was filtered or not
+        feature_outputs = render_contrastive_feature(view_camera, feature_model_to_render, self.opt, self.bg_feature)
+
         if self.cluster_in_3D_flag:
             self.cluster_in_3D_flag = False
             print("Clustering in 3D...")
             self.cluster_in_3D()
             print("Clustering finished.")
-        self.rendered_cluster = None if self.cluster_point_colors is None else render(view_camera, self.engine['scene'], self.opt, self.bg_color, override_color=torch.from_numpy(self.cluster_point_colors).cuda().float())["render"].permute(1, 2, 0)
-        # --- RGB image --- #
-        img = scene_outputs["render"].permute(1, 2, 0)  #
 
-        rgb_score = img.clone()
+        # Handle self.rendered_cluster logic considering the preview
+        if is_previewing_isolate:
+            self.rendered_cluster = None # No cluster view when isolating
+        elif self.render_mode_cluster and self.cluster_point_colors is not None:
+            # Ensure cluster_point_colors is compatible with scene_to_render (which is original scene here)
+            if self.cluster_point_colors.shape[0] == scene_to_render.get_xyz.shape[0]:
+                 self.rendered_cluster = render(view_camera, scene_to_render, self.opt, self.bg_color, override_color=self.cluster_point_colors)["render"].permute(1, 2, 0)
+            else:
+                 print("Warning: cluster_point_colors shape mismatch with scene model. Disabling cluster view.")
+                 self.rendered_cluster = None
+                 self.render_mode_cluster = False # Turn off if problematic
+        else:
+            self.rendered_cluster = None
+
+        # --- RGB image --- #
+        img = scene_outputs["render"].permute(1, 2, 0)
+        rgb_score = img.clone() # This will be the image shown, potentially modified by 2D (pixel-based) preview below
         depth_score = rgb_score.cpu().numpy().reshape(-1)
 
         # --- semantic image --- #
@@ -3189,7 +3320,11 @@ class GaussianSplattingGUI:
                     self.engine['feature'].clear_segment()
             except Exception as e:
                 print(f"Error in clear_edit calling clear_segment: {e}")
-            print("GUI clear_edit: Cleared click prompts and active selection mask.")
+
+            self.show_3d_preview = False
+            self.preview_selection_mask = None
+            self.update_camera = True
+            print("GUI clear_edit: Cleared click prompts, active selection mask, and 3D preview state.")
 
 
         if self.roll_back:
@@ -3414,13 +3549,17 @@ class GaussianSplattingGUI:
         if self.render_mode_pca:
             self.render_buffer = sem_transed_rgb.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + sem_transed_rgb.cpu().numpy().reshape(-1)
             render_num += 1
-        if self.render_mode_cluster:
-            if self.rendered_cluster is None:
-                self.render_buffer = rgb_score.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + rgb_score.cpu().numpy().reshape(-1)
-            else:
+        if self.render_mode_cluster: # This is for the multi-view composition at the end
+            if self.rendered_cluster is not None: # If 3D preview was active, rendered_cluster is None
+                # Use the dedicated self.rendered_cluster if available (meaning no 3D selection preview was active)
                 self.render_buffer = self.rendered_cluster.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + self.rendered_cluster.cpu().numpy().reshape(-1)
-            
+            else:
+                # If 3D selection preview was active, rendered_cluster is None.
+                # We still need to contribute to render_buffer if render_mode_cluster is true.
+                # In this case, rgb_score (which includes the 3D selection preview) is the best we have.
+                self.render_buffer = rgb_score.cpu().numpy().reshape(-1) if self.render_buffer is None else self.render_buffer + rgb_score.cpu().numpy().reshape(-1)
             render_num += 1
+
         if self.render_mode_similarity:
             if score_map is not None:
                 self.render_buffer = self.grayscale_to_colormap(score_map.squeeze().cpu().numpy()).reshape(-1).astype(np.float32) if self.render_buffer is None else self.render_buffer + self.grayscale_to_colormap(score_map.squeeze().cpu().numpy()).reshape(-1).astype(np.float32)
